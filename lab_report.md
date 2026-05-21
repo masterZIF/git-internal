@@ -1,8 +1,18 @@
 # 实验报告 - 实验三 题目三：Git Pack 文件统计工具设计与实现
 
+- **选题**：实验 3 - Pack Decode 流程理解与改进 / 题目 3：新增 Pack Decode 统计工具函数（评分系数 1.20）
+- **代码仓库地址**：https://github.com/masterZIF/git-internal （分支：`experiment-3`）
+
 ## 1. 实验目的与背景
 Git 仓库在传输或存储时，会通过打包（Pack）的方式将松散对象（Loose Objects）打包成一个 `.pack` 文件及对应的 `.idx` 索引文件。这种机制极大地减少了磁盘空间和网络带宽消耗。
 本实验的目的是在已有的 `git-internal` 解析器库基础上，设计并实现一个统计工具函数 `decode_stats`，该函数能够对给定的 `.pack` 文件进行完整的并行解码，并准确统计其中包含的所有 Git 对象（Commit、Tree、Blob、Tag）的数量以及处于 Delta 压缩状态的对象数量。
+
+## 1.1 修改的文件与函数
+
+| 文件 | 修改内容 |
+|------|----------|
+| `src/internal/pack/decode.rs` | 新增 `PackStats` 结构体（第 794–802 行）；新增 `decode_stats` 工具函数（第 804–870 行）；新增 4 个单元测试函数 |
+| `src/internal/pack/mod.rs` | 新增 `pub use decode::{PackStats, decode_stats};` 将接口重导出 |
 
 ## 2. 方案设计与核心实现
 为了保证高性能，本设计充分重用了 `git-internal` 现有的多线程并发解码机制，避免了重复编写解码主循环，并通过线程安全的数据结构收集统计指标。
