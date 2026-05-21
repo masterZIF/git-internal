@@ -787,9 +787,86 @@ impl Pack {
             data_decompressed: result,
             mem_recorder: None,
             is_delta_in_pack: delta_obj.is_delta_in_pack,
-        } // Canonical form (Complete Object)
-        // Memory recording will happen after this function returns. See `process_delta`
+        }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackStats {
+    pub total: usize,
+    pub commits: usize,
+    pub trees: usize,
+    pub blobs: usize,
+    pub tags: usize,
+    pub deltas: usize,
+}
+
+pub fn decode_stats<P: AsRef<std::path::Path>>(pack_path: P) -> Result<PackStats, GitError> {
+    let path = pack_path.as_ref();
+    if !path.exists() {
+        return Err(GitError::InvalidPackFile(format!(
+            "Pack file not found: {}",
+            path.display()
+        )));
+    }
+    let kind = if path.to_string_lossy().contains("sha256") {
+        crate::hash::HashKind::Sha256
+    } else {
+        crate::hash::HashKind::Sha1
+    };
+    let _guard = crate::hash::set_hash_kind_for_test(kind);
+    let f = std::fs::File::open(path)
+        .map_err(|e| GitError::InvalidPackFile(format!("Failed to open pack file: {}", e)))?;
+    let mut reader = std::io::BufReader::new(f);
+    let mut pack = Pack::new(None, None, None, true);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct StatsCounters {
+        commits: AtomicUsize,
+        trees: AtomicUsize,
+        blobs: AtomicUsize,
+        tags: AtomicUsize,
+        deltas: AtomicUsize,
+    }
+    let stats = std::sync::Arc::new(StatsCounters {
+        commits: AtomicUsize::new(0),
+        trees: AtomicUsize::new(0),
+        blobs: AtomicUsize::new(0),
+        tags: AtomicUsize::new(0),
+        deltas: AtomicUsize::new(0),
+    });
+    let stats_clone = stats.clone();
+    pack.decode(
+        &mut reader,
+        move |entry| {
+            if entry.meta.is_delta.unwrap_or(false) {
+                stats_clone.deltas.fetch_add(1, Ordering::SeqCst);
+            }
+            match entry.inner.obj_type {
+                crate::internal::object::types::ObjectType::Commit => {
+                    stats_clone.commits.fetch_add(1, Ordering::SeqCst);
+                }
+                crate::internal::object::types::ObjectType::Tree => {
+                    stats_clone.trees.fetch_add(1, Ordering::SeqCst);
+                }
+                crate::internal::object::types::ObjectType::Blob => {
+                    stats_clone.blobs.fetch_add(1, Ordering::SeqCst);
+                }
+                crate::internal::object::types::ObjectType::Tag => {
+                    stats_clone.tags.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        },
+        None::<fn(ObjectHash)>,
+    )?;
+    Ok(PackStats {
+        total: pack.number,
+        commits: stats.commits.load(Ordering::SeqCst),
+        trees: stats.trees.load(Ordering::SeqCst),
+        blobs: stats.blobs.load(Ordering::SeqCst),
+        tags: stats.tags.load(Ordering::SeqCst),
+        deltas: stats.deltas.load(Ordering::SeqCst),
+    })
 }
 
 #[cfg(test)]
@@ -808,7 +885,9 @@ mod tests {
     use futures_util::TryStreamExt;
     use tokio_util::io::ReaderStream;
 
+    use super::{PackStats, decode_stats};
     use crate::{
+        errors::GitError,
         hash::{HashKind, ObjectHash, set_hash_kind_for_test},
         internal::pack::{Pack, tests::init_logger},
     };
@@ -1058,5 +1137,53 @@ mod tests {
                 let _ = futures::future::join(f1, f2).await;
             }
         });
+    }
+
+    #[test]
+    fn test_decode_stats_sha1() {
+        let mut source = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        source.push("tests/data/packs/small-sha1.pack");
+        let stats: PackStats = decode_stats(source).unwrap();
+        assert_eq!(stats.total, 19);
+        assert_eq!(stats.commits, 2);
+        assert_eq!(stats.trees, 2);
+        assert_eq!(stats.blobs, 15);
+        assert_eq!(stats.tags, 0);
+        assert_eq!(stats.deltas, 0);
+    }
+
+    #[test]
+    fn test_decode_stats_sha256() {
+        let mut source = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        source.push("tests/data/packs/small-sha256.pack");
+        let stats: PackStats = decode_stats(source).unwrap();
+        assert_eq!(stats.total, 19);
+        assert_eq!(stats.commits, 2);
+        assert_eq!(stats.trees, 2);
+        assert_eq!(stats.blobs, 15);
+        assert_eq!(stats.tags, 0);
+        assert_eq!(stats.deltas, 0);
+    }
+
+    #[test]
+    fn test_decode_stats_file_not_found() {
+        let path = PathBuf::from("tests/data/packs/non-existent-file.pack");
+        let result = decode_stats(path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::InvalidPackFile(msg) => {
+                assert!(msg.contains("Pack file not found"));
+            }
+            _ => panic!("Expected InvalidPackFile error"),
+        }
+    }
+
+    #[test]
+    fn test_decode_stats_invalid_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.pack");
+        fs::write(&path, b"invalid pack content").unwrap();
+        let result = decode_stats(path);
+        assert!(result.is_err());
     }
 }

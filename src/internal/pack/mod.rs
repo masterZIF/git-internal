@@ -5,6 +5,7 @@ pub mod cache;
 pub mod cache_object;
 pub mod channel_reader;
 pub mod decode;
+pub use decode::{PackStats, decode_stats};
 pub mod encode;
 pub mod entry;
 mod index_entry;
